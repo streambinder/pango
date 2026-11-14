@@ -87,7 +87,7 @@ func TestCmdShowLyricsLeadingBlankLines(t *testing.T) {
 
 	tag, err := id3.Open(path, id3v2.Options{Parse: true})
 	assert.Nil(t, err)
-	tag.SetLyrics("Title", "\n\nfirst lyric line\nsecond lyric line")
+	tag.SetLyrics("\n\nfirst lyric line\nsecond lyric line")
 	assert.Nil(t, tag.Save())
 	assert.Nil(t, tag.Close())
 

@@ -131,15 +131,19 @@ func (tag *Tag) AttachedPicture() (string, []byte) {
 	return "", []byte{}
 }
 
-func (tag *Tag) SetLyrics(title, lyrics string) {
-	tag.setUnsynchronizedLyrics(title, lyrics)
+func (tag *Tag) SetLyrics(lyrics string) {
+	tag.setUnsynchronizedLyrics(lyrics)
 }
 
-func (tag *Tag) setUnsynchronizedLyrics(title, data string) {
+func (tag *Tag) setUnsynchronizedLyrics(data string) {
+	// The content descriptor stays empty: players reading tags
+	// through FFmpeg expose the frame as lyrics-<descriptor>-<lang>,
+	// so a descriptor hides the lyrics from players that look up
+	// the plain lyrics key.
 	tag.AddUnsynchronisedLyricsFrame(id3v2.UnsynchronisedLyricsFrame{
 		Encoding:          tag.DefaultEncoding(),
 		Language:          "eng",
-		ContentDescriptor: title,
+		ContentDescriptor: "",
 		Lyrics:            lyrics.GetPlain(data),
 	})
 }

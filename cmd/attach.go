@@ -70,7 +70,7 @@ func cmdAttach() *cobra.Command {
 			localTrack.SetArtworkURL(spotifyTrack.Artwork.URL)
 			localTrack.SetAttachedPicture(<-artwork)
 			localTrack.SetDuration(strconv.Itoa(spotifyTrack.Duration))
-			localTrack.SetLyrics(spotifyTrack.Title, uslt)
+			localTrack.SetLyrics(uslt)
 			localTrack.SetTrackNumber(strconv.Itoa(spotifyTrack.Number))
 			localTrack.SetYear(strconv.Itoa(spotifyTrack.Year))
 			localTrack.SetUpstreamURL(spotifyTrack.UpstreamURL)
