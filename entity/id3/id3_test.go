@@ -1,9 +1,11 @@
 package id3
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/bogem/id3v2/v2"
 	"github.com/stretchr/testify/assert"
@@ -97,6 +99,186 @@ func TestOpenSpotifyID(t *testing.T) {
 	assert.NotNil(t, tag)
 	defer func() { assert.Nil(t, tag.Close()) }()
 	assert.Equal(t, "Spotify ID", tag.SpotifyID())
+}
+
+// rawFrame is a single ID3v2 frame written verbatim by writeRawTagFile
+type rawFrame struct {
+	id   string
+	body []byte
+}
+
+// synchsafe encodes size as four seven-bit bytes, the ID3v2 size format
+func synchsafe(size int) []byte {
+	return []byte{
+		byte(size >> 21 & 0x7F),
+		byte(size >> 14 & 0x7F),
+		byte(size >> 7 & 0x7F),
+		byte(size & 0x7F),
+	}
+}
+
+// plainSize encodes size as a plain big-endian integer, the ID3v2.3
+// frame size format
+func plainSize(size int) []byte {
+	return []byte{
+		byte(size >> 24),
+		byte(size >> 16),
+		byte(size >> 8),
+		byte(size),
+	}
+}
+
+// txxxBody builds a user-defined text frame body with the given
+// encoding, description and value
+func txxxBody(encoding byte, description, value string) []byte {
+	body := []byte{encoding}
+	body = append(body, description...)
+	body = append(body, 0)
+	body = append(body, value...)
+	return body
+}
+
+// utf16Units encodes s as UTF-16 code units in the given byte order,
+// without a BOM
+func utf16Units(s string, order binary.ByteOrder) []byte {
+	var b []byte
+	for _, u := range utf16.Encode([]rune(s)) {
+		var buf [2]byte
+		order.PutUint16(buf[:], u)
+		b = append(b, buf[:]...)
+	}
+	return b
+}
+
+// txxxBodyUTF16 builds a user-defined text frame body with a UTF-16
+// encoding, a BOM before the description and the value, and a
+// null-terminated description
+func txxxBodyUTF16(encoding byte, bom []byte, order binary.ByteOrder, description, value string) []byte {
+	body := []byte{encoding}
+	body = append(body, bom...)
+	body = append(body, utf16Units(description, order)...)
+	body = append(body, 0, 0)
+	body = append(body, bom...)
+	body = append(body, utf16Units(value, order)...)
+	return body
+}
+
+// audioAfterTag starts with bytes that decode as a huge frame size, so
+// a parser reading past the tag area fails instead of stopping cleanly
+var audioAfterTag = []byte{0x41, 0x42, 0x07, 0x7F, 0x7F, 0x7F, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFB, 0x90, 0x00}
+
+// writeRawTagFile creates a file holding a hand-built ID3v2 tag with the
+// given frames, trailing padding and trailing audio bytes, and returns
+// its path; it lets tests reproduce tags whose frame layout a writer
+// produced but a strict parser cannot read back
+func writeRawTagFile(t *testing.T, name string, version byte, frames []rawFrame, padding int, audio []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+
+	var tag []byte
+	for _, frame := range frames {
+		tag = append(tag, frame.id...)
+		if version == 4 {
+			tag = append(tag, synchsafe(len(frame.body))...)
+		} else {
+			tag = append(tag, plainSize(len(frame.body))...)
+		}
+		tag = append(tag, 0, 0)
+		tag = append(tag, frame.body...)
+	}
+	tag = append(tag, make([]byte, padding)...)
+
+	header := []byte{'I', 'D', '3', version, 0, 0}
+	header = append(header, synchsafe(len(tag))...)
+
+	assert.Nil(t, os.WriteFile(path, append(header, append(tag, audio...)...), 0o600))
+	return path
+}
+
+func TestOpenSpotifyIDTrailingPadding(t *testing.T) {
+	// testing: a tag ending in fewer than ten bytes of padding (a frame
+	// header cannot fit there) still yields its Spotify ID instead of
+	// failing with "frame went over tag area"
+	// Note: UTF-16BE with BOM is left out — the parser mis-decodes it,
+	// a separate upstream decoding quirk unrelated to the padding, and
+	// the library writes UTF-8
+	tests := []struct {
+		name    string
+		version byte
+		frames  []rawFrame
+		padding int
+		wantID  string
+	}{
+		{
+			name:    "v2.4 two-byte padding",
+			version: 4,
+			frames:  []rawFrame{{"TXXX", txxxBody(3, frameSpotifyID, "test-id-123")}},
+			padding: 2,
+			wantID:  "test-id-123",
+		},
+		{
+			name:    "v2.4 no padding",
+			version: 4,
+			frames:  []rawFrame{{"TXXX", txxxBody(3, frameSpotifyID, "test-id-123")}},
+			padding: 0,
+			wantID:  "test-id-123",
+		},
+		{
+			name:    "v2.4 seven-byte padding",
+			version: 4,
+			frames:  []rawFrame{{"TXXX", txxxBody(3, frameSpotifyID, "test-id-123")}},
+			padding: 7,
+			wantID:  "test-id-123",
+		},
+		{
+			name:    "v2.3 two-byte padding",
+			version: 3,
+			frames:  []rawFrame{{"TXXX", txxxBody(0, frameSpotifyID, "test-id-123")}},
+			padding: 2,
+			wantID:  "test-id-123",
+		},
+		{
+			name:    "v2.4 two-byte padding with UTF-16LE value",
+			version: 4,
+			frames:  []rawFrame{{"TXXX", txxxBodyUTF16(1, []byte{0xFF, 0xFE}, binary.LittleEndian, frameSpotifyID, "test-id-123")}},
+			padding: 2,
+			wantID:  "test-id-123",
+		},
+		{
+			name:    "v2.4 two-byte padding with UTF-16BE no-BOM value",
+			version: 4,
+			frames:  []rawFrame{{"TXXX", txxxBodyUTF16(2, nil, binary.BigEndian, frameSpotifyID, "test-id-123")}},
+			padding: 2,
+			wantID:  "test-id-123",
+		},
+		{
+			name:    "v2.4 two-byte padding with null-terminated value",
+			version: 4,
+			frames:  []rawFrame{{"TXXX", append(txxxBody(3, frameSpotifyID, "test-id-123"), 0)}},
+			padding: 2,
+			wantID:  "test-id-123",
+		},
+		{
+			name:    "v2.4 two-byte padding without Spotify ID",
+			version: 4,
+			frames:  []rawFrame{{"TXXX", txxxBody(3, "Other", "x")}},
+			padding: 2,
+			wantID:  "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeRawTagFile(t, "track.mp3", tc.version, tc.frames, tc.padding, audioAfterTag)
+			tag, err := OpenSpotifyID(path)
+			assert.Nil(t, err)
+			assert.NotNil(t, tag)
+			if err != nil || tag == nil {
+				return
+			}
+			defer func() { assert.Nil(t, tag.Close()) }()
+			assert.Equal(t, tc.wantID, tag.SpotifyID())
+		})
+	}
 }
 
 func TestUserDefinedTextInvalidFrame(t *testing.T) {
