@@ -3,6 +3,7 @@ package lyrics
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -161,9 +162,10 @@ func Search(track *entity.Track) (string, error) {
 	}
 
 	// a single failing composer must not abort the others:
-	// fail only when every composer failed
+	// fail only when every composer failed, bubbling up every
+	// downstream error instead of keeping the first one only
 	if len(failures) > 0 && len(failures) == len(composers) {
-		return "", failures[0]
+		return "", errors.Join(failures...)
 	}
 
 	result = normalize(result)
@@ -217,9 +219,10 @@ func Get(url string) (string, error) {
 	}
 
 	// a single failing composer must not abort the others:
-	// fail only when every composer failed
+	// fail only when every composer failed, bubbling up every
+	// downstream error instead of keeping the first one only
 	if len(failures) > 0 && len(failures) == len(composers) {
-		return "", failures[0]
+		return "", errors.Join(failures...)
 	}
 
 	return string(normalize(result)), nil

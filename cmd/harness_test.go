@@ -233,7 +233,10 @@ func youtubeResponse(web webScript) (*http.Response, error) {
 		return nil, errors.New("ko")
 	}
 	if web.noResults {
-		return rawResponse(200, "text/html", []byte("<html></html>")), nil
+		// a genuine empty result still carries ytInitialData, with
+		// no videos in it: a page without it is a format change,
+		// not an empty result
+		return rawResponse(200, "text/html", []byte(`<script>var ytInitialData = {"contents":{"twoColumnSearchResultsRenderer":{"primaryContents":{"sectionListRenderer":{"contents":[]}}}}}</script>`)), nil
 	}
 	return rawResponse(200, "text/html", []byte(youtubePage())), nil
 }

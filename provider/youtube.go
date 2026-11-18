@@ -166,7 +166,11 @@ func (provider youTube) parseResults(track *entity.Track, query string, body io.
 		return strings.TrimSuffix(strings.TrimSpace(selection.Text()[len(prefix):]), ";")
 	}), "")
 	if json == "" {
-		return []*Match{}, nil
+		// a results page without ytInitialData carries no results to
+		// parse: it is a consent page, a captcha page or a format
+		// change, never a genuine empty result — surface it as an
+		// error instead of silently reporting the track as not found
+		return nil, errors.New("youtube: search page format changed (ytInitialData not found)")
 	}
 
 	var (

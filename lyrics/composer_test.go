@@ -117,12 +117,15 @@ func TestSearchAlreadyExists(t *testing.T) {
 func TestSearchFailure(t *testing.T) {
 	uncached := uncachedTrack(t, "test-failure")
 	setComposers(t,
-		stubComposer{searchErr: errors.New("ko")},
-		stubComposer{searchErr: errors.New("ko")},
+		stubComposer{searchErr: errors.New("ko-a")},
+		stubComposer{searchErr: errors.New("ko-b")},
 	)
 
-	// testing: every composer failed → the first failure is returned
-	assert.EqualError(t, sys.ErrOnly(Search(uncached)), "ko")
+	// testing: every composer failed → every downstream error is
+	// returned, not the first one only
+	err := sys.ErrOnly(Search(uncached))
+	assert.ErrorContains(t, err, "ko-a")
+	assert.ErrorContains(t, err, "ko-b")
 }
 
 func TestSearchNotFound(t *testing.T) {
@@ -183,12 +186,15 @@ func TestGet(t *testing.T) {
 
 func TestGetFailure(t *testing.T) {
 	setComposers(t,
-		stubComposer{getErr: errors.New("ko")},
-		stubComposer{getErr: errors.New("ko")},
+		stubComposer{getErr: errors.New("ko-a")},
+		stubComposer{getErr: errors.New("ko-b")},
 	)
 
-	// testing
-	assert.EqualError(t, sys.ErrOnly(Get("http://localhost")), "ko")
+	// testing: every composer failed → every downstream error is
+	// returned, not the first one only
+	err := sys.ErrOnly(Get("http://localhost"))
+	assert.ErrorContains(t, err, "ko-a")
+	assert.ErrorContains(t, err, "ko-b")
 }
 
 func TestSearchPartialFailure(t *testing.T) {
