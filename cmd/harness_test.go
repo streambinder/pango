@@ -24,11 +24,11 @@ import (
 // This file holds the shared fakes every command test runs against.
 // Every network boundary of the application bottoms out in
 // http.DefaultTransport (the Spotify API and OAuth2 endpoints through the
-// spotify client, genius and lrclib through http.DefaultClient, youtube
-// through http.Get, blob downloads through a client with a nil transport),
-// and every external tool is invoked by bare name (ffmpeg, yt-dlp, the
-// platform opener). Command tests therefore run the real code end to end,
-// scripting only transports, PATH binaries and the filesystem.
+// spotify client, genius and lrclib through http.DefaultClient, blob
+// downloads through a client with a nil transport), and every external
+// tool is invoked by bare name (ffmpeg, yt-dlp, the platform opener).
+// Command tests therefore run the real code end to end, scripting only
+// transports, PATH binaries and the filesystem.
 
 const (
 	tokenJSON = `{"access_token":"access","token_type":"Bearer",` +
@@ -167,8 +167,10 @@ func rawResponse(status int, contentType string, body []byte) *http.Response {
 	}
 }
 
-// webScript scripts the non-Spotify web boundaries: the lyrics providers,
-// the search providers and artwork downloads.
+// webScript scripts the non-Spotify web boundaries: the lyrics providers
+// and artwork downloads. The search provider is scripted through the
+// fake yt-dlp binary instead: providerErr and noResults translate into
+// control files in syncEnv, since the search no longer touches HTTP.
 type webScript struct {
 	lyricsErr       bool // lrclib and genius both fail
 	noLyrics        bool // lrclib answers with empty lyrics
@@ -191,8 +193,6 @@ func installWeb(t *testing.T, overrides map[string]func(*http.Request) (int, str
 			return lrclibResponse(web)
 		case "api.genius.com":
 			return geniusResponse(web), nil
-		case "www.youtube.com":
-			return youtubeResponse(web)
 		case "ima.ge":
 			// the artwork blob download
 			if web.artworkErr {
@@ -228,19 +228,6 @@ func geniusResponse(web webScript) *http.Response {
 	return jsonResponse(200, `{"response":{"hits":[]}}`)
 }
 
-func youtubeResponse(web webScript) (*http.Response, error) {
-	if web.providerErr {
-		return nil, errors.New("ko")
-	}
-	if web.noResults {
-		// a genuine empty result still carries ytInitialData, with
-		// no videos in it: a page without it is a format change,
-		// not an empty result
-		return rawResponse(200, "text/html", []byte(`<script>var ytInitialData = {"contents":{"twoColumnSearchResultsRenderer":{"primaryContents":{"sectionListRenderer":{"contents":[]}}}}}</script>`)), nil
-	}
-	return rawResponse(200, "text/html", []byte(youtubePage())), nil
-}
-
 // jpegBytes encodes a real 1x1 JPEG: the artwork pipeline decodes the
 // downloaded picture, so placeholder bytes would not pass.
 func jpegBytes(t *testing.T) []byte {
@@ -249,18 +236,6 @@ func jpegBytes(t *testing.T) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
 	assert.Nil(t, jpeg.Encode(&buffer, img, nil))
 	return buffer.Bytes()
-}
-
-// youtubePage renders a minimal YouTube results page carrying one video
-// matching the fixture track.
-func youtubePage() string {
-	return `<script>var ytInitialData = {"contents":{"twoColumnSearchResultsRenderer":` +
-		`{"primaryContents":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":` +
-		`{"contents":[{"videoRenderer":{"videoId":"abc123","title":{"runs":[{"text":"Title"}]},` +
-		`"ownerText":{"runs":[{"text":"Artist"}]},` +
-		`"viewCountText":{"simpleText":"1.000.000 views"},` +
-		`"lengthText":{"simpleText":"3:00 minutes"},` +
-		`"publishedTimeText":{"simpleText":"1 year ago"}}}]}}]}}}}}</script>`
 }
 
 // seedSession writes a valid, non-expired OAuth2 token to the session
@@ -294,7 +269,9 @@ func noSession(t *testing.T) {
 // fakeBinDir installs fake ffmpeg, yt-dlp and opener binaries on PATH and
 // returns their directory. A binary's behavior is driven by control files
 // in the same directory: creating "<name>.fail" makes it fail, and the
-// opener appends its arguments to "open.log".
+// opener appends its arguments to "open.log". The fake yt-dlp answers a
+// search invocation (--dump-json) with one canned JSON line matching the
+// fixture track, or with nothing when "ytdlp.noresults" exists.
 func fakeBinDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -326,6 +303,13 @@ exit 0
 	ytdlp := `#!/bin/sh
 printf '%s\n' "$*" >> "` + dir + `/ytdlp.log"
 if [ -f "` + dir + `/ytdlp.fail" ]; then echo "yt-dlp blew up" >&2; exit 1; fi
+case "$*" in
+*--dump-json*)
+  if [ -f "` + dir + `/ytdlp.noresults" ]; then exit 0; fi
+  printf '%s\n' '{"id":"abc123","title":"Title","uploader":"Artist","description":"some description","duration":180,"view_count":1000000,"channel_is_verified":true}'
+  exit 0
+  ;;
+esac
 out=""
 fmt=""
 prev=""

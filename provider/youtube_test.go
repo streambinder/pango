@@ -1,10 +1,10 @@
 package provider
 
 import (
-	"errors"
 	"fmt"
-	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/streambinder/pango/entity"
@@ -13,78 +13,44 @@ import (
 )
 
 const (
-	resultViewsText     = "1.000.000 views"
-	resultLengthText    = "3:00 minutes"
-	resultPublishedText = "1 year ago"
-	resultScript        = `<script>var ytInitialData = {
-		"contents": {
-			"twoColumnSearchResultsRenderer": {
-				"primaryContents": {
-					"sectionListRenderer": {
-						"contents": [{
-							"itemSectionRenderer": {
-								"contents": [{
-									"videoRenderer": {
-										"videoId": "%s",
-										"title": {
-											"runs": [{
-												"text": "%s"
-											}]
-										},
-										"ownerText": {
-											"runs": [{
-												"text": "%s"
-											}]
-										},
-										"detailedMetadataSnippets": [{
-											"snippetText": {
-												"runs": [{
-													"text": "%s"
-												}]
-											}
-										}],
-										"viewCountText": {
-											"simpleText": "%s"
-										},
-										"lengthText": {
-											"simpleText": "%s"
-										},
-										"publishedTimeText": {
-											"simpleText": "%s"
-										}
-									}
-								}]
-							}
-						}]
-					}
-				}
-			}
-		}
-	}</script>`
+	// resultJSON is a compliant search result for the fixture track:
+	// title and owner match, duration matches, verified channel. Its
+	// description carries a misleading word, so the description score
+	// exercises the misleading penalty.
+	resultJSON = `{"id":"abc123","title":"Title","uploader":"Artist",` +
+		`"description":"some description cover","duration":180,` +
+		`"view_count":1000000,"channel_is_verified":true}`
+	// otherJSON would score high on duration and views, but its owner
+	// and title match neither the artist nor the song: the compliance
+	// filter must drop it before scoring.
+	otherJSON = `{"id":"xyz999","title":"Other Song","uploader":"Someone Else",` +
+		`"description":"some other description","duration":180,` +
+		`"view_count":5000000,"channel_is_verified":true}`
 )
 
-var result = youTubeResult{
-	id:          "123",
-	title:       "title",
-	owner:       "artist",
-	description: misleading[0],
-	views:       1000000,
-	length:      180,
+// youTubeDlScript renders a stub yt-dlp that prints the given JSON
+// lines, one per line, whatever its arguments.
+func youTubeDlScript(lines ...string) string {
+	script := "#!/bin/sh\n"
+	for _, line := range lines {
+		script += fmt.Sprintf("printf '%%s\\n' '%s'\n", line)
+	}
+	return script
 }
 
-// youtubeResultPage renders the canned search results page carrying the
-// shared result fixture.
-func youtubeResultPage() string {
-	return fmt.Sprintf(
-		resultScript,
-		result.id,
-		result.title,
-		result.owner,
-		result.description,
-		resultViewsText,
-		resultLengthText,
-		resultPublishedText,
-	)
+// stubYouTubeDl replaces the yt-dlp binary with a stub script on PATH
+// for the duration of the test, the same way the command tests stub
+// their tools.
+func stubYouTubeDl(t *testing.T, script string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ytdlp-stub-*")
+	assert.Nil(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	path := filepath.Join(dir, "yt-dlp")
+	assert.Nil(t, os.WriteFile(path, []byte(script), 0o600))
+	//nolint:gosec // the stub must run as a command.
+	assert.Nil(t, os.Chmod(path, 0o755))
+	t.Setenv("PATH", dir)
 }
 
 func BenchmarkYouTube(b *testing.B) {
@@ -94,129 +60,86 @@ func BenchmarkYouTube(b *testing.B) {
 }
 
 func TestYouTubeSearch(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		return httpResponse(200, youtubeResultPage()), nil
-	})
+	stubYouTubeDl(t, youTubeDlScript(resultJSON, otherJSON))
 
-	// testing
-	assert.Nil(t, sys.ErrOnly(youTube{}.search(track)))
+	// testing: only the compliant result is returned, with its score
+	// (description 16 + duration 30 + views 12 + channel 4, the
+	// description carrying the misleading penalty)
+	matches, err := youTube{}.search(track)
+	assert.Nil(t, err)
+	assert.Len(t, matches, 1)
+	assert.Equal(t, "https://youtu.be/abc123", matches[0].URL)
+	assert.Equal(t, 62, matches[0].Score)
 }
 
-func TestYouTubeSearchMalformedData(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		return httpResponse(200, `<script>var ytInitialData = {"content": {}`), nil
-	})
+func TestYouTubeSearchEmptyOutput(t *testing.T) {
+	stubYouTubeDl(t, youTubeDlScript())
 
-	// testing
-	assert.NotNil(t, sys.ErrOnly(youTube{}.search(track)))
+	// testing: no lines means no matches, not an error
+	matches, err := youTube{}.search(track)
+	assert.Nil(t, err)
+	assert.Empty(t, matches)
 }
 
-func TestYouTubeSearchPartialData(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		return httpResponse(200, fmt.Sprintf(
-			resultScript,
-			result.id,
-			"",
-			"",
-			"",
-			"",
-			"",
-			"",
-		)), nil
-	})
+func TestYouTubeSearchDescriptionFirstLine(t *testing.T) {
+	// the description is the opening lines only: a misleading word
+	// in the credits below the first line must not penalize the
+	// result, the way the scraper snippet never saw it
+	stubYouTubeDl(t, youTubeDlScript(
+		`{"id":"abc123","title":"Title","uploader":"Artist",`+
+			`"description":"some description\ncover in the credits","duration":180,`+
+			`"view_count":1000000,"channel_is_verified":true}`,
+	))
 
-	// testing
-	assert.Nil(t, sys.ErrOnly(youTube{}.search(track)))
+	// testing: no misleading penalty, the full score
+	matches, err := youTube{}.search(track)
+	assert.Nil(t, err)
+	assert.Len(t, matches, 1)
+	assert.Equal(t, 86, matches[0].Score)
 }
 
-func TestYouTubeSearchMaxRetriesExceeded(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		response := httpResponse(429, "")
-		response.Header.Set("Retry-After", "0")
-		return response, nil
-	})
+func TestYouTubeSearchMalformedLine(t *testing.T) {
+	stubYouTubeDl(t, youTubeDlScript("not json"))
 
-	// testing
-	assert.EqualError(t, sys.ErrOnly(youTube{}.search(track)), "youtube: max retries exceeded")
+	// testing: a line that is not JSON is a format problem, surfaced
+	// as an error instead of silently reporting the track as not found
+	assert.ErrorContains(t, sys.ErrOnly(youTube{}.search(track)), "cannot parse search result")
 }
 
-func TestYouTubeSearchTooManyRequests(t *testing.T) {
-	callCount := 0
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		callCount++
-		if callCount == 1 {
-			response := httpResponse(429, "")
-			response.Header.Set("Retry-After", "0")
-			return response, nil
-		}
-		return httpResponse(200, youtubeResultPage()), nil
-	})
+func TestYouTubeSearchFailingBinary(t *testing.T) {
+	stubYouTubeDl(t, "#!/bin/sh\necho ko >&2\nexit 1\n")
 
-	// testing
-	assert.Nil(t, sys.ErrOnly(youTube{}.search(track)))
+	// testing: a non-zero exit bubbles the yt-dlp output up
+	err := sys.ErrOnly(youTube{}.search(track))
+	assert.ErrorContains(t, err, "yt-dlp search failed")
+	assert.ErrorContains(t, err, "ko")
 }
 
-func TestYouTubeSearchRedirectLoop(t *testing.T) {
-	stubHTTP(t, func(request *http.Request) (*http.Response, error) {
-		response := httpResponse(302, "")
-		response.Header.Set("Location", request.URL.String())
-		return response, nil
-	})
+func TestYouTubeSearchFailingBinarySilent(t *testing.T) {
+	stubYouTubeDl(t, "#!/bin/sh\nexit 1\n")
 
-	// testing: captcha redirect fails fast without retrying
-	assert.EqualError(t, sys.ErrOnly(youTube{}.search(track)), "youtube: blocked by google captcha")
+	// testing: a non-zero exit with no output still reports the exit
+	err := sys.ErrOnly(youTube{}.search(track))
+	assert.ErrorContains(t, err, "yt-dlp search failed")
+	assert.ErrorContains(t, err, "exit status 1")
 }
 
-func TestYouTubeSearchNoData(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		return httpResponse(200, "<script>some unmatching script</script>"), nil
-	})
+func TestYouTubeSearchMissingBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 
-	// testing: a page without ytInitialData is a format change, not
-	// an empty result — it must fail, not report "not found"
-	assert.ErrorContains(t, sys.ErrOnly(youTube{}.search(track)), "ytInitialData")
+	// testing: a missing binary is a clear error, not a silent miss
+	assert.ErrorContains(t, sys.ErrOnly(youTube{}.search(track)), "yt-dlp binary not found")
 }
 
-func TestYouTubeSearchFailingRequest(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("ko")
-	})
-
-	// testing: the client wraps transport errors in a url.Error
-	assert.ErrorContains(t, sys.ErrOnly(youTube{}.search(track)), "ko")
-}
-
-func TestYouTubeSearchFailingRequestStatus(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		return httpResponse(500, ""), nil
-	})
-
-	// testing
-	assert.Error(t, sys.ErrOnly(youTube{}.search(track)))
-}
-
-func TestYouTubeSearchFailingGoQuery(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		response := httpResponse(200, "")
-		response.Body = errReader{errors.New("ko")}
-		return response, nil
-	})
-
-	// testing
-	assert.EqualError(t, sys.ErrOnly(youTube{}.search(track)), "ko")
-}
-
-func TestScraping(t *testing.T) {
-	if os.Getenv("TEST_SCRAPING") == "" {
-		t.Skip("TEST_SCRAPING unset")
+func TestYouTubeSearchLive(t *testing.T) {
+	if os.Getenv("TEST_YTDLP") == "" {
+		t.Skip("TEST_YTDLP unset")
+	}
+	if _, err := exec.LookPath("yt-dlp"); err != nil {
+		t.Skip("yt-dlp binary not found in PATH")
 	}
 
-	// the only test actually hitting the network: the keep-alive conn it
-	// leaves in the default pool keeps an http2 readLoop goroutine around,
-	// which goleak would report as a leak on package exit
-	defer http.DefaultClient.CloseIdleConnections()
-
-	// testing
+	// testing: the real binary searches live
 	matches, err := youTube{}.search(&entity.Track{
 		Title:    "White Christmas",
 		Artists:  []string{"Bing Crosby"},

@@ -38,6 +38,15 @@ func syncEnv(t *testing.T, overrides map[string]func(*http.Request) (int, string
 	resetState(t)
 	seedSession(t)
 	binDir := fakeBinDir(t)
+	// the search provider runs the yt-dlp binary, so the search script
+	// flags translate into its control files: a failing search, or one
+	// that finds nothing
+	if web.providerErr {
+		assert.Nil(t, os.WriteFile(filepath.Join(binDir, "ytdlp.fail"), nil, 0o644))
+	}
+	if web.noResults {
+		assert.Nil(t, os.WriteFile(filepath.Join(binDir, "ytdlp.noresults"), nil, 0o644))
+	}
 	installWeb(t, overrides, web)
 	clearTrackCache(t, "123", "456", "789", "999")
 	return t.TempDir(), binDir

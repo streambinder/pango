@@ -1,103 +1,50 @@
 package provider
 
 import (
-	"errors"
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
-	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/PuerkitoBio/goquery"
-	jsoniter "github.com/json-iterator/go"
 	"github.com/streambinder/pango/entity"
 	"github.com/streambinder/pango/sys"
+	"github.com/streambinder/pango/sys/cmd"
 )
 
 type youTube struct{}
 
 const maxYouTubeConcurrentSearches = 2
 
-// youTubeSearchSlots caps concurrent YouTube page scrapes no matter how
+// youTubeSearchSlots caps concurrent YouTube searches no matter how
 // many decide workers run, keeping 429s and captcha triggers at bay
 var youTubeSearchSlots = make(chan struct{}, maxYouTubeConcurrentSearches)
 
-type youTubeInitialData struct {
-	Contents struct {
-		TwoColumnSearchResultsRenderer struct {
-			PrimaryContents struct {
-				SectionListRenderer struct {
-					Contents []struct {
-						ItemSectionRenderer struct {
-							Contents []struct {
-								VideoRenderer struct {
-									VideoID string
-									Title   struct {
-										Runs []Run
-									}
-									OwnerText struct {
-										Runs []Run
-									}
-									ViewCountText struct {
-										SimpleText string
-									}
-									LengthText struct {
-										SimpleText string
-									}
-									PublishedTimeText struct {
-										SimpleText string
-									}
-									DetailedMetadataSnippets []DetailedMetadataSnippet
-									OwnerBadges              []OwnerBadge
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-type DetailedMetadataSnippet struct {
-	SnippetText SnippetText
-}
-
-type OwnerBadge struct {
-	MetadataBadgeRenderer MetadataBadgeRenderer
-}
-type MetadataBadgeRenderer struct {
-	Icon Icon
-}
-
-type Icon struct {
-	IconType string
-}
-
-type SnippetText struct {
-	Runs []Run
-}
-
-type Run struct {
-	Text string
+// youTubeSearchEntry is one JSON line of a yt-dlp flat playlist
+// search: the video id, title, uploader, description, duration in
+// seconds, view count and verified channel flag.
+type youTubeSearchEntry struct {
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	Uploader        string `json:"uploader"`
+	Description     string `json:"description"`
+	Duration        int    `json:"duration"`
+	ViewCount       int    `json:"view_count"`
+	ChannelVerified bool   `json:"channel_is_verified"`
 }
 
 type youTubeResult struct {
-	track                 *entity.Track
-	query                 string
-	id                    string
-	title                 string
-	owner                 string
-	description           string
-	views                 int
-	length                int
-	year                  int
-	officialArtistChannel bool
-	verifiedChannel       bool
+	track           *entity.Track
+	query           string
+	id              string
+	title           string
+	owner           string
+	description     string
+	views           int
+	length          int
+	verifiedChannel bool
 }
 
 func init() {
@@ -121,116 +68,42 @@ func (provider youTube) search(track *entity.Track) ([]*Match, error) {
 	youTubeSearchSlots <- struct{}{}
 	defer func() { <-youTubeSearchSlots }()
 
-	for attempt := 0; attempt < sys.MaxRetries; attempt++ {
-		matches, retry, err := func() ([]*Match, bool, error) {
-			response, err := http.Get("https://www.youtube.com/results?search_query=" + url.QueryEscape(query) + "&sp=EgIQAQ%253D%253D")
-			if err != nil {
-				// google captcha/sorry page causes a redirect loop;
-				// this won't resolve by retrying — fail fast and let the
-				// caller's circuit breaker handle the cascade
-				if strings.Contains(err.Error(), "stopped after") && strings.Contains(err.Error(), "redirects") {
-					return nil, false, fmt.Errorf("youtube: blocked by google captcha")
-				}
-				return nil, false, err
-			}
-			defer response.Body.Close()
-
-			if response.StatusCode == 429 {
-				sys.SleepUntilRetry(response.Header)
-				return nil, true, nil
-			} else if response.StatusCode != 200 {
-				return nil, false, errors.New("cannot fetch results on youtube: " + response.Status)
-			}
-
-			result, parseErr := provider.parseResults(track, query, response.Body)
-			return result, false, parseErr
-		}()
-		if retry {
-			continue
-		}
-		return matches, err
+	output, err := cmd.YouTubeDlSearch(context.Background(), query)
+	if err != nil {
+		return nil, fmt.Errorf("youtube: %w", err)
 	}
-	return nil, errors.New("youtube: max retries exceeded")
+
+	return provider.parseResults(track, query, output)
 }
 
-func (provider youTube) parseResults(track *entity.Track, query string, body io.Reader) ([]*Match, error) {
-	document, err := goquery.NewDocumentFromReader(body)
-	if err != nil {
-		return nil, err
-	}
-	json := strings.Join(document.Find("script").Map(func(_ int, selection *goquery.Selection) string {
-		prefix := "var ytInitialData ="
-		if !strings.HasPrefix(strings.TrimPrefix(selection.Text(), " "), prefix) {
-			return ""
+func (provider youTube) parseResults(track *entity.Track, query string, output []byte) ([]*Match, error) {
+	var matches []*Match
+	for _, line := range bytes.Split(output, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
 		}
-		return strings.TrimSuffix(strings.TrimSpace(selection.Text()[len(prefix):]), ";")
-	}), "")
-	if json == "" {
-		// a results page without ytInitialData carries no results to
-		// parse: it is a consent page, a captcha page or a format
-		// change, never a genuine empty result — surface it as an
-		// error instead of silently reporting the track as not found
-		return nil, errors.New("youtube: search page format changed (ytInitialData not found)")
-	}
-
-	var (
-		matches []*Match
-		data    youTubeInitialData
-	)
-	if err := jsoniter.ConfigCompatibleWithStandardLibrary.Unmarshal([]byte(json), &data); err != nil {
-		return nil, err
-	}
-	for _, section := range data.Contents.TwoColumnSearchResultsRenderer.PrimaryContents.SectionListRenderer.Contents {
-		for _, result := range section.ItemSectionRenderer.Contents {
-			for _, title := range result.VideoRenderer.Title.Runs {
-				match := youTubeResult{
-					track: track,
-					query: query,
-					id:    result.VideoRenderer.VideoID,
-					title: title.Text,
-					owner: sys.First(result.VideoRenderer.OwnerText.Runs, Run{}).Text,
-					description: sys.First(sys.First(result.VideoRenderer.DetailedMetadataSnippets, DetailedMetadataSnippet{
-						SnippetText: SnippetText{Runs: []Run{{Text: ""}}},
-					}).SnippetText.Runs, Run{}).Text,
-					views: func(viewCount string) int {
-						if viewCount == "" {
-							return 0
-						}
-						return sys.ErrWrap(0)(strconv.Atoi(strings.Join(regexp.MustCompile("[0-9]+").FindAllString(viewCount, -1), "")))
-					}(result.VideoRenderer.ViewCountText.SimpleText),
-					length: func(length string) int {
-						if length == "" {
-							return 0
-						}
-						var (
-							digits  = strings.Split(length, ":")
-							minutes = sys.ErrWrap(0)(strconv.Atoi(digits[0]))
-							seconds = sys.ErrWrap(0)(strconv.Atoi(digits[1]))
-						)
-						return minutes*60 + seconds
-					}(result.VideoRenderer.LengthText.SimpleText),
-					year: func(ago string) int {
-						yearsAgo := 0
-						if strings.Contains(ago, " year") {
-							yearsAgo = sys.ErrWrap(0)(strconv.Atoi(strings.Split(ago, " year")[0]))
-						}
-						return time.Now().Year() - yearsAgo
-					}(result.VideoRenderer.PublishedTimeText.SimpleText),
-					officialArtistChannel: func(iconType string) bool {
-						return iconType == "OFFICIAL_ARTIST_BADGE"
-					}(sys.First(result.VideoRenderer.OwnerBadges, OwnerBadge{
-						MetadataBadgeRenderer: MetadataBadgeRenderer{Icon: Icon{IconType: ""}},
-					}).MetadataBadgeRenderer.Icon.IconType),
-					verifiedChannel: func(iconType string) bool {
-						return iconType == "CHECK_CIRCLE_THICK"
-					}(sys.First(result.VideoRenderer.OwnerBadges, OwnerBadge{
-						MetadataBadgeRenderer: MetadataBadgeRenderer{Icon: Icon{IconType: ""}},
-					}).MetadataBadgeRenderer.Icon.IconType),
-				}
-				if match.compliant(track) {
-					matches = append(matches, &Match{fmt.Sprintf("https://youtu.be/%s", match.id), match.score()})
-				}
-			}
+		var entry youTubeSearchEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			return nil, fmt.Errorf("youtube: cannot parse search result: %w", err)
+		}
+		match := youTubeResult{
+			track: track,
+			query: query,
+			id:    entry.ID,
+			title: entry.Title,
+			owner: entry.Uploader,
+			// the scraper read the snippet, the opening lines of the
+			// description. The full description carries credits where
+			// misleading words like "studio" routinely appear, and
+			// those would systematically penalize official videos.
+			description:     sys.FirstLine(entry.Description),
+			views:           entry.ViewCount,
+			length:          entry.Duration,
+			verifiedChannel: entry.ChannelVerified,
+		}
+		if match.compliant(track) {
+			matches = append(matches, &Match{fmt.Sprintf("https://youtu.be/%s", match.id), match.score()})
 		}
 	}
 
@@ -241,7 +114,7 @@ func (provider youTube) parseResults(track *entity.Track, query string, body io.
 // so to ensure that only the results that pass certain pre-checks get returned
 func (result youTubeResult) compliant(track *entity.Track) bool {
 	spec := sys.UniqueFields(fmt.Sprintf("%s %s", result.owner, result.title))
-	return result.id != "" && result.year >= track.Year &&
+	return result.id != "" &&
 		sys.Contains(spec, strings.Split(sys.UniqueFields(track.Artist()), " ")...) &&
 		sys.Contains(spec, strings.Split(sys.UniqueFields(track.Song()), " ")...)
 }
@@ -307,8 +180,9 @@ func (result youTubeResult) viewsScore() int {
 
 // return a score for result's channel according to its badges
 //
-//	0–70% is assigned if it's official
-//	0-30% is assigned if it's verified
+//	0-30% is assigned if it's verified. The official-artist badge
+//	is not part of the score: it never appears in search data, so
+//	there is nothing to check against.
 func (result youTubeResult) channelScore() int {
-	return sys.Ternary(result.officialArtistChannel, 70, 0) + sys.Ternary(result.verifiedChannel, 30, 0)
+	return sys.Ternary(result.verifiedChannel, 30, 0)
 }
