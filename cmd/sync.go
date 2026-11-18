@@ -513,7 +513,12 @@ func decideTrack(ch chan error, consecutiveFailures *atomic.Int32, track *entity
 
 	matches, err := provider.Search(track)
 	if err != nil {
-		consecutiveFailures.Add(1)
+		// the breaker trips on the worker whose failure reaches the
+		// threshold: log it once, so the "search unavailable" skips
+		// that follow carry a visible cause in the error log
+		if failures := consecutiveFailures.Add(1); failures == maxConsecutiveFailures {
+			tui.AnchorPrintf("search circuit breaker tripped after %d consecutive failures: %v", failures, err)
+		}
 		tui.AnchorPrintf("%s by %s (id: %s) search failed: %v", track.Title, track.Artist(), track.ID, err)
 		return false
 	}
@@ -532,15 +537,18 @@ func decideTrack(ch chan error, consecutiveFailures *atomic.Int32, track *entity
 // for a blob to be processed (basically
 // a wrapper around: retriever, composer and painter)
 func routineCollect(skipLyrics bool) func(context.Context, chan error) {
-	return func(_ context.Context, _ chan error) {
+	return func(_ context.Context, ch chan error) {
 		// remember to stop passing data to the processor
 		defer close(routineQueues[routineTypeProcess])
 
 		// workers never report errors back: a failed collection
 		// drops the track without aborting the sync
-		_ = nursery.RunMultipleCopiesConcurrently(collectWorkers, func(ctx context.Context, _ chan error) { //nolint:errcheck
+		if err := nursery.RunMultipleCopiesConcurrently(collectWorkers, func(ctx context.Context, _ chan error) {
 			collectWorker(ctx, skipLyrics)
-		})
+		}); err != nil {
+			ch <- err
+			return
+		}
 
 		tui.Lot("download").Close()
 		tui.Lot("compose").Close()

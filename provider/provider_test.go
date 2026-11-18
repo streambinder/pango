@@ -49,6 +49,14 @@ func (failingProvider) search(*entity.Track) ([]*Match, error) {
 	return nil, errors.New("ko")
 }
 
+// errProvider is a provider whose search always fails with the given
+// error, to exercise error bubbling in Search.
+type errProvider struct{ err error }
+
+func (p errProvider) search(*entity.Track) ([]*Match, error) {
+	return nil, p.err
+}
+
 func httpResponse(status int, body string) *http.Response {
 	return &http.Response{
 		StatusCode: status,
@@ -89,9 +97,27 @@ func TestSearchFailure(t *testing.T) {
 		return nil, errors.New("ko")
 	})
 
-	// all providers failed → propagate as error
+	// all providers failed → propagate as error, carrying the
+	// downstream cause instead of a generic message
 	_, err := Search(track)
-	assert.EqualError(t, err, "all providers failed")
+	assert.ErrorContains(t, err, "all providers failed")
+	assert.ErrorContains(t, err, "ko")
+}
+
+func TestSearchFailureBubblesUpstreamErrors(t *testing.T) {
+	previous := providers
+	providers = []Provider{
+		errProvider{errors.New("youtube: blocked by google captcha")},
+		errProvider{errors.New("second provider: connection refused")},
+	}
+	t.Cleanup(func() { providers = previous })
+
+	// testing: every provider failed → the error carries every
+	// downstream cause, not a generic message
+	_, err := Search(track)
+	assert.ErrorContains(t, err, "all providers failed")
+	assert.ErrorContains(t, err, "youtube: blocked by google captcha")
+	assert.ErrorContains(t, err, "second provider: connection refused")
 }
 
 func TestSearchPartialFailure(t *testing.T) {

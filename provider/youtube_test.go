@@ -149,7 +149,7 @@ func TestYouTubeSearchTooManyRequests(t *testing.T) {
 			response.Header.Set("Retry-After", "0")
 			return response, nil
 		}
-		return httpResponse(200, ""), nil
+		return httpResponse(200, youtubeResultPage()), nil
 	})
 
 	// testing
@@ -172,8 +172,9 @@ func TestYouTubeSearchNoData(t *testing.T) {
 		return httpResponse(200, "<script>some unmatching script</script>"), nil
 	})
 
-	// testing
-	assert.Nil(t, sys.ErrOnly(youTube{}.search(track)))
+	// testing: a page without ytInitialData is a format change, not
+	// an empty result — it must fail, not report "not found"
+	assert.ErrorContains(t, sys.ErrOnly(youTube{}.search(track)), "ytInitialData")
 }
 
 func TestYouTubeSearchFailingRequest(t *testing.T) {

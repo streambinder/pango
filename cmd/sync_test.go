@@ -523,8 +523,12 @@ func TestCmdSyncDecideCircuitBreaker(t *testing.T) {
 	}, webScript{providerErr: true})
 
 	// testing: repeated search failures trip the circuit breaker and
-	// the remaining tracks are skipped, without failing the sync
-	assert.Nil(t, sys.ErrOnly(testExecute(cmdSync(), "--plain", "-o", musicDir, "-l")))
+	// the remaining tracks are skipped, without failing the sync;
+	// the trip itself is logged once, with its cause
+	output := captureStdout(t, func() {
+		assert.Nil(t, sys.ErrOnly(testExecute(cmdSync(), "--plain", "-o", musicDir, "-l")))
+	})
+	assert.Contains(t, output, "search circuit breaker tripped after 3 consecutive failures")
 	entries, err := os.ReadDir(musicDir)
 	assert.Nil(t, err)
 	assert.Empty(t, entries)
