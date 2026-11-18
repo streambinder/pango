@@ -34,7 +34,7 @@ go install
 Outside of Docker, Pango shells out to a couple of binaries and expects them on `PATH`:
 
 - `ffmpeg` — used by the Processor to normalize volume and re-mux downloaded audio.
-- `yt-dlp` — used by the YouTube provider to fetch the chosen result.
+- `yt-dlp` — used by the YouTube provider to search for and fetch the chosen result.
 
 Install them via your package manager (e.g. `apt install ffmpeg yt-dlp`, `brew install ffmpeg yt-dlp`, `dnf install ffmpeg yt-dlp`). The published Docker image bundles both already.
 

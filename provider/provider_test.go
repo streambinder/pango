@@ -2,9 +2,6 @@ package provider
 
 import (
 	"errors"
-	"io"
-	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/streambinder/pango/entity"
@@ -20,25 +17,6 @@ var track = &entity.Track{
 	Duration: 180,
 	Number:   1,
 	Year:     1970,
-}
-
-// roundTripFunc adapts a function to http.RoundTripper, so tests can
-// script every HTTP response the providers receive without any network.
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return f(request)
-}
-
-// stubHTTP routes all provider HTTP traffic through the given handler:
-// the shared default transport is replaced for the duration of the test.
-func stubHTTP(t *testing.T, handler func(*http.Request) (*http.Response, error)) {
-	t.Helper()
-	previousDefault := http.DefaultTransport
-	http.DefaultTransport = roundTripFunc(handler)
-	t.Cleanup(func() {
-		http.DefaultTransport = previousDefault
-	})
 }
 
 // failingProvider is a provider whose search always fails, to exercise
@@ -57,21 +35,6 @@ func (p errProvider) search(*entity.Track) ([]*Match, error) {
 	return nil, p.err
 }
 
-func httpResponse(status int, body string) *http.Response {
-	return &http.Response{
-		StatusCode: status,
-		Status:     http.StatusText(status),
-		Header:     http.Header{},
-		Body:       io.NopCloser(strings.NewReader(body)),
-	}
-}
-
-// errReader fails every read, to exercise body reading failures.
-type errReader struct{ err error }
-
-func (r errReader) Read([]byte) (int, error) { return 0, r.err }
-func (r errReader) Close() error             { return nil }
-
 func BenchmarkProvider(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		TestSearch(&testing.T{})
@@ -79,12 +42,7 @@ func BenchmarkProvider(b *testing.B) {
 }
 
 func TestSearch(t *testing.T) {
-	stubHTTP(t, func(request *http.Request) (*http.Response, error) {
-		if request.URL.Host == "www.youtube.com" {
-			return httpResponse(200, youtubeResultPage()), nil
-		}
-		return nil, errors.New("unexpected host: " + request.URL.Host)
-	})
+	stubYouTubeDl(t, youTubeDlScript(resultJSON))
 
 	// testing
 	matches, err := Search(track)
@@ -93,9 +51,7 @@ func TestSearch(t *testing.T) {
 }
 
 func TestSearchFailure(t *testing.T) {
-	stubHTTP(t, func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("ko")
-	})
+	stubYouTubeDl(t, "#!/bin/sh\necho ko >&2\nexit 1\n")
 
 	// all providers failed → propagate as error, carrying the
 	// downstream cause instead of a generic message
@@ -124,12 +80,7 @@ func TestSearchPartialFailure(t *testing.T) {
 	previous := providers
 	providers = append(append([]Provider{}, providers...), failingProvider{})
 	t.Cleanup(func() { providers = previous })
-	stubHTTP(t, func(request *http.Request) (*http.Response, error) {
-		if request.URL.Host == "www.youtube.com" {
-			return httpResponse(200, youtubeResultPage()), nil
-		}
-		return nil, errors.New("unexpected host: " + request.URL.Host)
-	})
+	stubYouTubeDl(t, youTubeDlScript(resultJSON))
 
 	// one provider succeeded → return its matches, no error
 	matches, err := Search(track)
