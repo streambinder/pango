@@ -6,7 +6,7 @@ import (
 )
 
 func ValidateEnvironment() error {
-	for _, cmd := range []string{"ffmpeg", "yt-dlp"} {
+	for _, cmd := range []string{"ffmpeg"} {
 		_, err := exec.LookPath(cmd)
 		if err != nil {
 			return fmt.Errorf("command %q not found in PATH", cmd)

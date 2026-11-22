@@ -42,7 +42,10 @@ func BenchmarkProvider(b *testing.B) {
 }
 
 func TestSearch(t *testing.T) {
-	stubYouTubeDl(t, youTubeDlScript(resultJSON))
+	stubYouTube(t, youTubeStub{
+		searchBody: searchJSON(resultRow()),
+		verified:   map[string]bool{"UCartist": true},
+	})
 
 	// testing
 	matches, err := Search(track)
@@ -51,13 +54,13 @@ func TestSearch(t *testing.T) {
 }
 
 func TestSearchFailure(t *testing.T) {
-	stubYouTubeDl(t, "#!/bin/sh\necho ko >&2\nexit 1\n")
+	stubYouTube(t, youTubeStub{searchBody: `{}`, searchStatus: 429})
 
 	// all providers failed → propagate as error, carrying the
 	// downstream cause instead of a generic message
 	_, err := Search(track)
 	assert.ErrorContains(t, err, "all providers failed")
-	assert.ErrorContains(t, err, "ko")
+	assert.ErrorContains(t, err, "youtube:")
 }
 
 func TestSearchFailureBubblesUpstreamErrors(t *testing.T) {
@@ -80,7 +83,10 @@ func TestSearchPartialFailure(t *testing.T) {
 	previous := providers
 	providers = append(append([]Provider{}, providers...), failingProvider{})
 	t.Cleanup(func() { providers = previous })
-	stubYouTubeDl(t, youTubeDlScript(resultJSON))
+	stubYouTube(t, youTubeStub{
+		searchBody: searchJSON(resultRow()),
+		verified:   map[string]bool{"UCartist": true},
+	})
 
 	// one provider succeeded → return its matches, no error
 	matches, err := Search(track)

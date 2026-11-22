@@ -19,12 +19,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: go.mod
-      - run: |
-          mkdir -p "$HOME/bin"
-          curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o "$HOME/bin/yt-dlp"
-          chmod +x "$HOME/bin/yt-dlp"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
       - run: go test -v -run ^TestYouTubeSearchLive$ ./...
         env:
-          TEST_YTDLP: true
+          TEST_YOUTUBE_LIVE: true
           GENIUS_TOKEN: ${{ secrets.GENIUS_TOKEN }}
