@@ -1,17 +1,18 @@
 package provider
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/tamnd/any-cli/kit/errs"
+	"github.com/tamnd/ytb-cli/ytb"
+
 	"github.com/streambinder/pango/entity"
 	"github.com/streambinder/pango/sys"
-	"github.com/streambinder/pango/sys/cmd"
 )
 
 type youTube struct{}
@@ -22,19 +23,17 @@ const maxYouTubeConcurrentSearches = 2
 // many decide workers run, keeping 429s and captcha triggers at bay
 var youTubeSearchSlots = make(chan struct{}, maxYouTubeConcurrentSearches)
 
-// youTubeSearchEntry is one JSON line of a yt-dlp flat playlist
-// search: the video id, title, uploader, description, duration in
-// seconds, view count and verified channel flag.
-type youTubeSearchEntry struct {
-	ID              string `json:"id"`
-	Title           string `json:"title"`
-	Uploader        string `json:"uploader"`
-	Description     string `json:"description"`
-	Duration        int    `json:"duration"`
-	ViewCount       int    `json:"view_count"`
-	ChannelVerified bool   `json:"channel_is_verified"`
-}
+// maxYouTubeSearchResults is the number of video rows a search
+// collects before halting the stream.
+const maxYouTubeSearchResults = 10
 
+// maxYouTubeFinalists is the number of top compliant results whose
+// channels are read to restore the verified badge.
+const maxYouTubeFinalists = 3
+
+// youTubeResult is one video from the search: the video id, title,
+// owner, description, duration in seconds, view count, verified
+// channel flag, and the channel id the badge fetch reads.
 type youTubeResult struct {
 	track           *entity.Track
 	query           string
@@ -45,6 +44,7 @@ type youTubeResult struct {
 	views           int
 	length          int
 	verifiedChannel bool
+	channelID       string
 }
 
 func init() {
@@ -68,45 +68,100 @@ func (provider youTube) search(track *entity.Track) ([]*Match, error) {
 	youTubeSearchSlots <- struct{}{}
 	defer func() { <-youTubeSearchSlots }()
 
-	output, err := cmd.YouTubeDlSearch(context.Background(), query)
+	var results []youTubeResult
+	err := sys.YouTubeClient.Search(
+		context.Background(),
+		query,
+		ytb.SearchFilters{Type: "video"},
+		ytb.PageOptions{MaxPages: 1},
+		func(item any) error {
+			video, ok := item.(ytb.Video)
+			if !ok {
+				return nil
+			}
+			results = append(results, youTubeResult{
+				track: track,
+				query: query,
+				id:    video.VideoID,
+				title: video.Title,
+				owner: video.ChannelTitle,
+				// the search row carries the snippet, the opening lines
+				// of the description. The full description carries
+				// credits where misleading words like "studio"
+				// routinely appear, and those would systematically
+				// penalize official videos.
+				description: sys.FirstLine(video.Description),
+				views:       int(video.ViewCount),
+				length:      video.DurationSeconds,
+				channelID:   video.ChannelID,
+			})
+			if len(results) >= maxYouTubeSearchResults {
+				return ytb.ErrStop
+			}
+			return nil
+		},
+	)
 	if err != nil {
+		// a search with no results is an empty result, not an error
+		if errs.KindOf(err) == errs.KindNoResults {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("youtube: %w", err)
 	}
 
-	return provider.parseResults(track, query, output)
+	return provider.rank(track, results)
 }
 
-func (provider youTube) parseResults(track *entity.Track, query string, output []byte) ([]*Match, error) {
-	var matches []*Match
-	for _, line := range bytes.Split(output, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
+// rank filters the compliant results, restores the verified badge
+// for the top finalists, and returns the matches sorted by score.
+func (provider youTube) rank(track *entity.Track, results []youTubeResult) ([]*Match, error) {
+	var compliant []youTubeResult
+	for _, result := range results {
+		if result.compliant(track) {
+			compliant = append(compliant, result)
+		}
+	}
+	sort.SliceStable(compliant, func(i, j int) bool {
+		return compliant[i].score() > compliant[j].score()
+	})
+
+	// the search row carries no badge, so the verified flag comes
+	// from one channel read per distinct channel id among the top
+	// finalists. A read that fails leaves the channel part at zero
+	// and never fails the search.
+	seen := map[string]bool{}
+	for i := range compliant {
+		if i >= maxYouTubeFinalists {
+			break
+		}
+		channelID := compliant[i].channelID
+		if channelID == "" || seen[channelID] {
 			continue
 		}
-		var entry youTubeSearchEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			return nil, fmt.Errorf("youtube: cannot parse search result: %w", err)
+		seen[channelID] = true
+		channel, err := sys.YouTubeClient.FetchChannel(
+			context.Background(),
+			channelID,
+			ytb.ChannelOptions{NoAbout: true},
+		)
+		if err != nil || channel == nil || !channel.IsVerified {
+			continue
 		}
-		match := youTubeResult{
-			track: track,
-			query: query,
-			id:    entry.ID,
-			title: entry.Title,
-			owner: entry.Uploader,
-			// the scraper read the snippet, the opening lines of the
-			// description. The full description carries credits where
-			// misleading words like "studio" routinely appear, and
-			// those would systematically penalize official videos.
-			description:     sys.FirstLine(entry.Description),
-			views:           entry.ViewCount,
-			length:          entry.Duration,
-			verifiedChannel: entry.ChannelVerified,
-		}
-		if match.compliant(track) {
-			matches = append(matches, &Match{fmt.Sprintf("https://youtu.be/%s", match.id), match.score()})
+		for j := range compliant {
+			if compliant[j].channelID == channelID {
+				compliant[j].verifiedChannel = true
+			}
 		}
 	}
 
+	sort.SliceStable(compliant, func(i, j int) bool {
+		return compliant[i].score() > compliant[j].score()
+	})
+
+	matches := make([]*Match, 0, len(compliant))
+	for _, result := range compliant {
+		matches = append(matches, &Match{fmt.Sprintf("https://youtu.be/%s", result.id), result.score()})
+	}
 	return matches, nil
 }
 

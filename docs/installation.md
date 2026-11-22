@@ -31,12 +31,11 @@ go install
 
 ### Runtime prerequisites
 
-Outside of Docker, Pango shells out to a couple of binaries and expects them on `PATH`:
+Outside of Docker, Pango shells out to one binary and expects it on `PATH`:
 
 - `ffmpeg` — used by the Processor to normalize volume and re-mux downloaded audio.
-- `yt-dlp` — used by the YouTube provider to search for and fetch the chosen result.
 
-Install them via your package manager (e.g. `apt install ffmpeg yt-dlp`, `brew install ffmpeg yt-dlp`, `dnf install ffmpeg yt-dlp`). The published Docker image bundles both already.
+Install it via your package manager (e.g. `apt install ffmpeg`, `brew install ffmpeg`, `dnf install ffmpeg`). The published Docker image bundles it already. YouTube search and download run in-process through a library, with no external binary.
 
 ### Embedding API keys
 

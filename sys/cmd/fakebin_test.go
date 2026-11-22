@@ -10,12 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// ffmpegName and ytdlpName are the bare names production code invokes
-// its tools by.
-const (
-	ffmpegName = "ffmpeg"
-	ytdlpName  = "yt-dlp"
-)
+// ffmpegName is the bare name production code invokes its tool by.
+const ffmpegName = "ffmpeg"
 
 // installFakeBinaries writes the given shell scripts as executables into a
 // fresh temporary directory and points PATH at that directory alone, so the

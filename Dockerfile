@@ -12,7 +12,7 @@ RUN --mount=type=secret,id=SPOTIFY_ID \
     go build -o pango -ldflags="-s -w -X \"github.com/streambinder/pango/spotify.fallbackSpotifyID=${SPOTIFY_ID}\" -X \"github.com/streambinder/pango/spotify.fallbackSpotifyKey=${SPOTIFY_KEY}\" -X \"github.com/streambinder/pango/lyrics.fallbackGeniusToken=${GENIUS_TOKEN}\"" .
 
 FROM alpine:3
-RUN apk add --no-cache ffmpeg yt-dlp && \
+RUN apk add --no-cache ffmpeg && \
     mkdir /data && \
     mkdir /cache && \
     adduser -S pango && \

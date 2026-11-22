@@ -15,24 +15,13 @@ func BenchmarkEnvironment(b *testing.B) {
 func TestValidateEnvironment(t *testing.T) {
 	installFakeBinaries(t, map[string]string{
 		ffmpegName: "exit 0\n",
-		ytdlpName:  "exit 0\n",
 	})
 
 	assert.Nil(t, ValidateEnvironment())
 }
 
 func TestValidateEnvironmentNoFFmpeg(t *testing.T) {
-	installFakeBinaries(t, map[string]string{
-		ytdlpName: "exit 0\n",
-	})
+	installEmptyPath(t)
 
 	assert.EqualError(t, ValidateEnvironment(), "command \"ffmpeg\" not found in PATH")
-}
-
-func TestValidateEnvironmentNoYtDlp(t *testing.T) {
-	installFakeBinaries(t, map[string]string{
-		ffmpegName: "exit 0\n",
-	})
-
-	assert.EqualError(t, ValidateEnvironment(), "command \"yt-dlp\" not found in PATH")
 }

@@ -14,6 +14,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/tamnd/ytb-cli/ytb"
 
 	"github.com/streambinder/pango/entity"
 	"github.com/streambinder/pango/spotify"
@@ -26,7 +29,9 @@ import (
 // http.DefaultTransport (the Spotify API and OAuth2 endpoints through the
 // spotify client, genius and lrclib through http.DefaultClient, blob
 // downloads through a client with a nil transport), and every external
-// tool is invoked by bare name (ffmpeg, yt-dlp, the platform opener).
+// tool is invoked by bare name (ffmpeg, the platform opener). The
+// YouTube boundary goes through the shared ytb client instead, so
+// installWeb points that client at the same scripted transport.
 // Command tests therefore run the real code end to end, scripting only
 // transports, PATH binaries and the filesystem.
 
@@ -167,10 +172,10 @@ func rawResponse(status int, contentType string, body []byte) *http.Response {
 	}
 }
 
-// webScript scripts the non-Spotify web boundaries: the lyrics providers
-// and artwork downloads. The search provider is scripted through the
-// fake yt-dlp binary instead: providerErr and noResults translate into
-// control files in syncEnv, since the search no longer touches HTTP.
+// webScript scripts the non-Spotify web boundaries: the lyrics providers,
+// artwork downloads, and the YouTube search and download. providerErr and
+// noResults translate into the search transport behaviour, and
+// downloadErr into the player transport behaviour.
 type webScript struct {
 	lyricsErr       bool // lrclib and genius both fail
 	noLyrics        bool // lrclib answers with empty lyrics
@@ -178,14 +183,16 @@ type webScript struct {
 	artworkErr      bool // the artwork URL answers 404
 	providerErr     bool // the search provider fails
 	noResults       bool // providers answer successfully but find nothing
+	downloadErr     bool // the download manifest carries no streams
 }
 
 // installWeb installs the Spotify router plus the scripted web fixtures
-// as the default transport.
+// as the default transport, and points the shared ytb client at the
+// same transport with no pacing and no retries.
 func installWeb(t *testing.T, overrides map[string]func(*http.Request) (int, string), web webScript) {
 	t.Helper()
 	router := newSpotifyRouter(overrides)
-	installTransport(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch request.URL.Host {
 		case "accounts.spotify.com", "api.spotify.com":
 			return router.RoundTrip(request)
@@ -199,13 +206,110 @@ func installWeb(t *testing.T, overrides map[string]func(*http.Request) (int, str
 				return rawResponse(404, "text/plain", []byte("not found")), nil
 			}
 			return rawResponse(200, "image/jpeg", jpegBytes(t)), nil
+		case "www.youtube.com":
+			return youTubeResponse(web, request), nil
+		case "googlevideo.example":
+			return youTubeRangeResponse(request), nil
 		default:
 			// any other host is unreachable: in particular, blob
 			// support probes (HEAD on a video page URL) must fail, so
 			// downloads fall through to the downloader owning the URL
 			return rawResponse(404, "text/plain", []byte("not found")), nil
 		}
-	}))
+	})
+	installTransport(t, transport)
+	client := ytb.NewClient(ytb.Config{
+		Workers: 1,
+		Delay:   0,
+		Timeout: 30 * time.Second,
+		Retries: 0,
+		HL:      "en",
+		GL:      "US",
+	})
+	client.HTTP().Transport = transport
+	previous := sys.YouTubeClient
+	sys.YouTubeClient = client
+	t.Cleanup(func() { sys.YouTubeClient = previous })
+}
+
+// youTubeAudioBytes is the canned stream the stub googlevideo host serves.
+const youTubeAudioBytes = "0123456789"
+
+// youTubeSearchJSON is a canned InnerTube search response with one
+// video row matching the fixture track.
+const youTubeSearchJSON = `{"contents":{"twoColumnSearchResultsRenderer":` +
+	`{"primaryContents":{"sectionListRenderer":{"contents":` +
+	`[{"itemSectionRenderer":{"contents":[{"videoRenderer":{` +
+	`"videoId":"abc123","title":{"simpleText":"Title"},` +
+	`"descriptionSnippet":{"simpleText":"some description"},` +
+	`"lengthText":{"simpleText":"3:00"},` +
+	`"publishedTimeText":{"simpleText":"1 month ago"},` +
+	`"ownerText":{"runs":[{"text":"Artist","navigationEndpoint":` +
+	`{"browseEndpoint":{"browseId":"UCartist"}}}]},` +
+	`"viewCountText":{"simpleText":"1,000,000 views"}}}]}}]}}}}}`
+
+// youTubeChannelPage is a canned channel page for the fixture
+// channel, carrying the verified badge.
+const youTubeChannelPage = `var ytInitialData = {"metadata":` +
+	`{"channelMetadataRenderer":{"externalId":"UCartist","title":"Artist"}},` +
+	`"header":{"pageHeaderRenderer":{"content":{"pageHeaderViewModel":` +
+	`{"title":{"dynamicTextViewModel":{"text":{"attachmentRuns":` +
+	`[{"element":{"type":{"imageType":{"image":{"sources":` +
+	`[{"clientResource":{"imageName":"CHECK_CIRCLE_FILLED"}}]}}}}}]}}}}}}}};`
+
+// youTubePlayerJSON is a canned player response carrying one
+// audio-only stream of ten bytes.
+const youTubePlayerJSON = `{"videoDetails":{"title":"Title","author":"Artist",` +
+	`"lengthSeconds":"180"},"playabilityStatus":{"status":"OK"},` +
+	`"streamingData":{"adaptiveFormats":[{"itag":140,` +
+	`"mimeType":"audio/mp4; codecs=\"mp4a.40.2\"","bitrate":128000,` +
+	`"audioQuality":"AUDIO_QUALITY_MEDIUM","contentLength":"10",` +
+	`"url":"https://googlevideo.example/audio","audioChannels":2,` +
+	`"audioSampleRate":"44100"}]}}`
+
+// youTubeResponse scripts the YouTube HTTP boundary the shared ytb
+// client talks to: the embed harvest page, the InnerTube search and
+// player endpoints, and channel pages.
+func youTubeResponse(web webScript, request *http.Request) *http.Response {
+	switch {
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/embed/"):
+		return rawResponse(200, "text/html", []byte(`"INNERTUBE_API_KEY":"test-key",`+
+			`"INNERTUBE_CLIENT_VERSION":"2.0","VISITOR_DATA":"test-visitor"`))
+	case request.Method == http.MethodPost && request.URL.Path == "/youtubei/v1/search":
+		if web.providerErr {
+			return jsonResponse(429, `{}`)
+		}
+		if web.noResults {
+			return jsonResponse(200, `{}`)
+		}
+		return jsonResponse(200, youTubeSearchJSON)
+	case request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/channel/"):
+		return rawResponse(200, "text/html", []byte(youTubeChannelPage))
+	case request.Method == http.MethodPost && request.URL.Path == "/youtubei/v1/player":
+		if web.downloadErr {
+			return jsonResponse(200, `{"videoDetails":{},`+
+				`"playabilityStatus":{"status":"OK"},"streamingData":{}}`)
+		}
+		return jsonResponse(200, youTubePlayerJSON)
+	}
+	return jsonResponse(404, `{}`)
+}
+
+// youTubeRangeResponse answers a ranged GET out of the canned audio bytes.
+func youTubeRangeResponse(request *http.Request) *http.Response {
+	start, end := 0, len(youTubeAudioBytes)-1
+	if span := request.Header.Get("Range"); span != "" {
+		// a malformed Range falls back to the full byte range
+		var rangeStart, rangeEnd int
+		if _, err := fmt.Sscanf(span, "bytes=%d-%d", &rangeStart, &rangeEnd); err == nil {
+			start, end = rangeStart, rangeEnd
+		}
+	}
+	body := youTubeAudioBytes[start : end+1]
+	response := rawResponse(206, "audio/mp4", []byte(body))
+	response.Header.Set("Content-Range",
+		fmt.Sprintf("bytes %d-%d/%d", start, end, len(youTubeAudioBytes)))
+	return response
 }
 
 func lrclibResponse(web webScript) (*http.Response, error) {
@@ -266,18 +370,21 @@ func noSession(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(path) })
 }
 
-// fakeBinDir installs fake ffmpeg, yt-dlp and opener binaries on PATH and
+// fakeBinDir installs fake ffmpeg and opener binaries on PATH and
 // returns their directory. A binary's behavior is driven by control files
 // in the same directory: creating "<name>.fail" makes it fail, and the
-// opener appends its arguments to "open.log". The fake yt-dlp answers a
-// search invocation (--dump-json) with one canned JSON line matching the
-// fixture track, or with nothing when "ytdlp.noresults" exists.
+// opener appends its arguments to "open.log". The YouTube search and
+// download are scripted through the transport in installWeb instead:
+// the provider and the downloader talk to the shared ytb client, not
+// to a binary.
 func fakeBinDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 
 	ffmpeg := `#!/bin/sh
 if [ -f "` + dir + `/ffmpeg.fail" ]; then echo "ffmpeg blew up" >&2; exit 1; fi
+last=""
+for arg in "$@"; do last="$arg"; done
 case "$*" in
 *measured_I*)
   if [ -f "` + dir + `/ffmpeg.normfail" ]; then echo "normalize blew up" >&2; exit 1; fi
@@ -291,35 +398,18 @@ case "$*" in
     printf '%s\n' '{"input_i":"-14.00","input_tp":"-1.50","input_lra":"11.00","input_thresh":"-25.00","target_offset":"0.00"}' >&2
   fi
   ;;
+*-q:a*)
+  # a transcode produces the target file: leave it empty, so the
+  # downstream tag writer opens a clean file, the way the old
+  # download fake left it
+  : > "$last"
+  exit 0
+  ;;
 esac
-last=""
-for arg in "$@"; do last="$arg"; done
 case "$last" in
 null|"") ;;
 *) printf 'audio' > "$last" ;;
 esac
-exit 0
-`
-	ytdlp := `#!/bin/sh
-printf '%s\n' "$*" >> "` + dir + `/ytdlp.log"
-if [ -f "` + dir + `/ytdlp.fail" ]; then echo "yt-dlp blew up" >&2; exit 1; fi
-case "$*" in
-*--dump-json*)
-  if [ -f "` + dir + `/ytdlp.noresults" ]; then exit 0; fi
-  printf '%s\n' '{"id":"abc123","title":"Title","uploader":"Artist","description":"some description","duration":180,"view_count":1000000,"channel_is_verified":true}'
-  exit 0
-  ;;
-esac
-out=""
-fmt=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--output" ]; then out="$arg"; fi
-  if [ "$prev" = "--audio-format" ]; then fmt="$arg"; fi
-  prev="$arg"
-done
-path=$(printf '%s' "$out" | sed "s/%(ext)s/$fmt/")
-: > "$path"
 exit 0
 `
 	opener := `#!/bin/sh
@@ -328,7 +418,7 @@ if [ -f "` + dir + `/open.fail" ]; then exit 1; fi
 exit 0
 `
 	for name, script := range map[string]string{
-		"ffmpeg": ffmpeg, "yt-dlp": ytdlp,
+		"ffmpeg":   ffmpeg,
 		"xdg-open": opener, "open": opener, "rundll32": opener,
 	} {
 		assert.Nil(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755))

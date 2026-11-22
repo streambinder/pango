@@ -38,15 +38,6 @@ func syncEnv(t *testing.T, overrides map[string]func(*http.Request) (int, string
 	resetState(t)
 	seedSession(t)
 	binDir := fakeBinDir(t)
-	// the search provider runs the yt-dlp binary, so the search script
-	// flags translate into its control files: a failing search, or one
-	// that finds nothing
-	if web.providerErr {
-		assert.Nil(t, os.WriteFile(filepath.Join(binDir, "ytdlp.fail"), nil, 0o644))
-	}
-	if web.noResults {
-		assert.Nil(t, os.WriteFile(filepath.Join(binDir, "ytdlp.noresults"), nil, 0o644))
-	}
 	installWeb(t, overrides, web)
 	clearTrackCache(t, "123", "456", "789", "999")
 	return t.TempDir(), binDir
@@ -128,7 +119,7 @@ func TestCmdSyncLyricsLeadingBlankLines(t *testing.T) {
 func TestCmdSyncInvalidEnvironment(t *testing.T) {
 	resetState(t)
 	seedSession(t)
-	// an empty PATH leaves ffmpeg and yt-dlp unreachable
+	// an empty PATH leaves ffmpeg unreachable
 	t.Setenv("PATH", t.TempDir())
 
 	// testing
@@ -576,8 +567,7 @@ func TestCmdSyncCollectFailure(t *testing.T) {
 }
 
 func TestCmdSyncDownloadFailure(t *testing.T) {
-	musicDir, binDir := syncEnv(t, nil, webScript{})
-	assert.Nil(t, os.WriteFile(filepath.Join(binDir, "ytdlp.fail"), nil, 0o644))
+	musicDir, _ := syncEnv(t, nil, webScript{downloadErr: true})
 
 	// testing: a failing download drops the track, not the sync
 	assert.Nil(t, sys.ErrOnly(testExecute(cmdSync(), "--plain", "-o", musicDir, "-l")))
