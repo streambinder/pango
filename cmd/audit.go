@@ -51,14 +51,23 @@ type collectionSelection struct {
 	libraryLimit    int
 }
 
+// readCollectionFlags reads the playlist, album and track selector flags
+func readCollectionFlags(cmd *cobra.Command) (playlists, albums, tracks []string) {
+	playlists = sys.ErrWrap([]string{})(cmd.Flags().GetStringArray("playlist"))
+	albums = sys.ErrWrap([]string{})(cmd.Flags().GetStringArray("album"))
+	tracks = sys.ErrWrap([]string{})(cmd.Flags().GetStringArray("track"))
+	return playlists, albums, tracks
+}
+
 // readSelection reads the collection selector flags
 func readSelection(cmd *cobra.Command) collectionSelection {
+	playlists, albums, tracks := readCollectionFlags(cmd)
 	return collectionSelection{
 		library:         sys.ErrWrap(false)(cmd.Flags().GetBool(flagLibrary)),
-		playlists:       sys.ErrWrap([]string{})(cmd.Flags().GetStringArray("playlist")),
+		playlists:       playlists,
 		playlistsTracks: sys.ErrWrap([]string{})(cmd.Flags().GetStringArray("playlist-tracks")),
-		albums:          sys.ErrWrap([]string{})(cmd.Flags().GetStringArray("album")),
-		tracks:          sys.ErrWrap([]string{})(cmd.Flags().GetStringArray("track")),
+		albums:          albums,
+		tracks:          tracks,
 		libraryLimit:    sys.ErrWrap(0)(cmd.Flags().GetInt("library-limit")),
 	}
 }

@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. The repository owner ratifies this decision.
+Accepted 2026-11-26. The repository owner ratified this decision.
 
 ## Context and Problem Statement
 

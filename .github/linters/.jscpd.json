@@ -10,7 +10,8 @@
     "**/.specify/scripts/**",
     "**/.specify/workflows/**",
     "**/.specify/integrations/**",
-    "**/.specify/*.json"
+    "**/.specify/*.json",
+    "**/specs/**"
   ],
   "absolute": true
 }

@@ -1,6 +1,6 @@
 # Pango Constitution
 
-**Status**: Draft. The repository owner ratifies this document.
+**Status**: Ratified 2026-11-26. The repository owner ratified this document.
 
 The canonical standard for this repository is the unciae golden
 standard (`streambinder/unciae`, file `AGENTS.md`). This constitution
@@ -224,4 +224,4 @@ review checks compliance with this constitution. A rule that proves
 wrong is amended through a recorded decision; the rule is never
 silently ignored.
 
-**Version**: 1.0.0 | **Ratified**: pending | **Last Amended**: 2026-10-26
+**Version**: 1.0.0 | **Ratified**: 2026-11-26 | **Last Amended**: 2026-11-26
