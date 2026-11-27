@@ -4,7 +4,7 @@ go 1.26.11
 
 require (
 	atomicgo.dev/cursor v0.2.0
-	github.com/PuerkitoBio/goquery v1.13.0
+	github.com/PuerkitoBio/goquery v1.14.0
 	github.com/adrg/xdg v0.5.3
 	github.com/agnivade/levenshtein v1.2.2
 	github.com/arunsworld/nursery v0.6.0
@@ -16,7 +16,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.1.0
 	github.com/stretchr/testify v1.12.1
-	github.com/tamnd/any-cli v0.4.11
+	github.com/tamnd/any-cli v0.4.13
 	github.com/tamnd/ytb-cli v0.6.0
 	github.com/thanhpk/randstr v1.0.7
 	github.com/zmb3/spotify/v2 v2.4.3
@@ -27,7 +27,7 @@ require (
 
 require (
 	charm.land/lipgloss/v2 v2.0.6 // indirect
-	github.com/andybalholm/cascadia v1.3.4 // indirect
+	github.com/andybalholm/cascadia v1.3.5 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/fang v1.0.0 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260811164956-006e29f97886 // indirect
